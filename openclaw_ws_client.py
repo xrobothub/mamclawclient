@@ -290,9 +290,9 @@ class OpenClawWSClient:
                 if remaining <= 0:
                     break
                 # Use a generous idle timeout — LLM may take time before first token
-                idle_timeout = 30.0 if not lifecycle_started else 10.0
+                idle_timeout = min(remaining, 60.0)
                 try:
-                    msg = await asyncio.wait_for(ev_q.get(), timeout=min(remaining, idle_timeout))
+                    msg = await asyncio.wait_for(ev_q.get(), timeout=idle_timeout)
                 except asyncio.TimeoutError:
                     # Idle timeout: if run never started, just give up; otherwise assume done
                     break

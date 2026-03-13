@@ -5,15 +5,17 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    _env_path = Path(__file__).parent / ".env"
+    _loaded = load_dotenv(_env_path)
 except ImportError:
-    pass  # python-dotenv 未安装时忽略，直接用系统环境变量
+    _loaded = False
+    print("[WARNING] python-dotenv not installed – .env will NOT be loaded")
 import httpx
 import time
-from pathlib import Path
 import traceback
 
 logging.basicConfig(
@@ -50,6 +52,7 @@ except ImportError:
 HUB_WS_URL = os.getenv("OPENCLAW_HUB_WS", "ws://127.0.0.1:9000/ws")  # default: local hub
 HUB_NAME   = os.getenv("OPENCLAW_HUB_NAME",   "Lobster")
 HUB_AVATAR = os.getenv("OPENCLAW_HUB_AVATAR",  "🦞")
+log.info(".env loaded=%s  HUB_NAME=%r  HUB_AVATAR=%r  HUB_WS_URL=%s", _loaded, HUB_NAME, HUB_AVATAR, HUB_WS_URL)
 
 _gw_client:  "OpenClawWSClient | None" = None
 _hub_client: "HubClient | None"        = None
@@ -110,6 +113,8 @@ async def _start_hub_client():
             log.info("hub on_message: calling _gw_client.chat for %s", from_name)
             events = await _gw_client.chat(prompt)
             log.info("hub on_message: got %d events from gw", len(events) if events else 0)
+            for i, e in enumerate(events or []):
+                log.info("  event[%d]: %s", i, str(e)[:200])
             text   = _extract_text(events)
             # Collapse 3+ consecutive newlines down to 2 (one blank line max)
             if text:
