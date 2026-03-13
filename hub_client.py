@@ -416,6 +416,16 @@ class HubClient:
 
 
 
+        elif t == "ping":
+
+            try:
+
+                await ws.send(json.dumps({"type": "pong"}))
+
+            except Exception:
+
+                pass
+
         elif t == "pong":
 
             pass
