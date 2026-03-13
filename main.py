@@ -16,7 +16,11 @@ import time
 from pathlib import Path
 import traceback
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
 log = logging.getLogger("openclaw-proxy")
 
 # ── OpenClaw 网关 ─────────────────────────────────────────────────────────────
@@ -43,7 +47,7 @@ except ImportError:
     _HUB_AVAILABLE = False
     log.warning("hub_client not importable – hub disabled")
 
-HUB_WS_URL = os.getenv("OPENCLAW_HUB_WS", "")      # e.g. ws://hub:9000/ws
+HUB_WS_URL = os.getenv("OPENCLAW_HUB_WS", "ws://127.0.0.1:9000/ws")  # default: local hub
 HUB_NAME   = os.getenv("OPENCLAW_HUB_NAME",   "Lobster")
 HUB_AVATAR = os.getenv("OPENCLAW_HUB_AVATAR",  "🦞")
 
@@ -86,20 +90,35 @@ def _extract_text(events: list[dict]) -> str:
 
 async def _start_hub_client():
     global _hub_client
-    if not (_HUB_AVAILABLE and HUB_WS_URL):
+    if not _HUB_AVAILABLE:
+        log.warning("Hub client not available (import failed)")
+        return
+    if not HUB_WS_URL:
+        log.warning("Hub client disabled: OPENCLAW_HUB_WS not set")
         return
 
     async def on_friend_message(from_id: str, from_name: str, content: str) -> str | None:
         """Route an incoming hub message through the local OpenClaw agent."""
-        if not (_gw_client and _gw_client.connected):
+        if not _gw_client:
+            log.warning("hub on_message: _gw_client is None, dropping message")
+            return None
+        if not _gw_client.connected:
+            log.warning("hub on_message: _gw_client not connected, dropping message")
             return None
         try:
             prompt = f"[来自 {from_name}]: {content}"
+            log.info("hub on_message: calling _gw_client.chat for %s", from_name)
             events = await _gw_client.chat(prompt)
+            log.info("hub on_message: got %d events from gw", len(events) if events else 0)
             text   = _extract_text(events)
+            # Collapse 3+ consecutive newlines down to 2 (one blank line max)
+            if text:
+                import re as _re
+                text = _re.sub(r'\n{3,}', '\n\n', text).strip()
+            log.info("hub on_message: extracted text=%s", (text or "")[:80])
             return text or None
         except Exception as e:
-            log.warning("hub on_message handler error: %s", e)
+            log.warning("hub on_message handler error: %s", e, exc_info=True)
             return None
 
     hub = HubClient(HUB_WS_URL, HUB_NAME, HUB_AVATAR, on_message=on_friend_message)

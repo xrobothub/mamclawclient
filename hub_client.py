@@ -172,6 +172,8 @@ class HubClient:
 
         self._friends: set[str]         = set()  # known friend ids (persisted for reconnect restore)
 
+        self._pending_reply: dict[str, dict] = {}  # peer_id -> last unsent reply payload
+
 
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -365,17 +367,17 @@ class HubClient:
 
                     reply = await self.on_message(from_id, from_name, content)
 
+                    log.info("Hub: AI replied for %s: %s", from_name, (reply or "")[:80])
+
                     if reply and self._ws:
 
-                        await self._ws.send(json.dumps({
+                        payload = {"type": "message", "to": from_id, "content": reply}
 
-                            "type":    "message",
+                        self._pending_reply[from_id] = payload
 
-                            "to":      from_id,
+                        await self._ws.send(json.dumps(payload))
 
-                            "content": reply,
-
-                        }))
+                        log.info("Hub: >>> sent reply to %s (%d chars)", from_id, len(reply))
 
                 except Exception as e:
 
@@ -414,6 +416,8 @@ class HubClient:
                 try:
 
                     reply = await self.on_message(from_id, from_name, content)
+
+                    log.info("Hub: AI replied for %s: %s", from_name, (reply or "")[:80])
 
                     if reply and self._ws:
 
@@ -458,6 +462,46 @@ class HubClient:
                 self._friends.add(fid)  # remember for reconnect restore
 
             log.debug("Hub event: friend_accepted from %s", fid)
+
+        elif t == "error":
+
+            code = msg.get("code", "")
+
+            log.warning("Hub: server error: %s", code)
+
+            if code == "NOT_FRIENDS" and self._friends and self._ws:
+
+                try:
+
+                    await self._ws.send(json.dumps({
+
+                        "type":    "friend_restore",
+
+                        "friends": list(self._friends),
+
+                    }))
+
+                    log.info("Hub: sent friend_restore after NOT_FRIENDS error")
+
+                    await asyncio.sleep(0.5)
+
+                    for peer_id, payload in list(self._pending_reply.items()):
+
+                        try:
+
+                            await self._ws.send(json.dumps(payload))
+
+                            log.info("Hub: retried reply to %s", peer_id)
+
+                        except Exception as e:
+
+                            log.warning("Hub: retry send failed: %s", e)
+
+                except Exception as e:
+
+                    log.warning("Hub: friend_restore after error failed: %s", e)
+
+
 
         elif t in ("peer_joined", "peer_left",
 
