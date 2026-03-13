@@ -58,6 +58,7 @@ class HubClient:
         self.connected: bool       = False
         self._ws                   = None
         self._task: asyncio.Task | None = None
+        self._groups: dict[str, dict]   = {}  # group_id -> {id,name,members}
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -155,6 +156,31 @@ class HubClient:
                         }))
                 except Exception as e:
                     log.warning("Hub: on_message callback error: %s", e)
+
+        elif t == "group_created":
+            g = msg.get("group") or {}
+            self._groups[g.get("id", "")] = g
+            log.info("Hub: joined group '%s' (%s)", g.get("name"), g.get("id", "")[:8])
+
+        elif t == "group_message":
+            group_id  = msg.get("group_id", "")
+            from_id   = msg.get("from", "")
+            from_name = msg.get("from_name", "?")
+            content   = msg.get("content", "")
+            group_name = (self._groups.get(group_id) or {}).get("name", group_id[:8])
+            log.info("Hub: group '%s' msg from %s: %s", group_name, from_name, content[:80])
+
+            if self.on_message:
+                try:
+                    reply = await self.on_message(from_id, from_name, content)
+                    if reply and self._ws:
+                        await self._ws.send(json.dumps({
+                            "type":     "group_message",
+                            "group_id": group_id,
+                            "content":  reply,
+                        }))
+                except Exception as e:
+                    log.warning("Hub: group on_message callback error: %s", e)
 
         elif t == "pong":
             pass
