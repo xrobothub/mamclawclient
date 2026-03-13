@@ -80,29 +80,31 @@ log = logging.getLogger("hub-client")
 
 def _load_or_create_peer_id() -> str:
 
-    """Return a stable 16-char hex ID, persisted to ~/.openclaw/hub_peer_id."""
+    """Return a stable 16-char hex ID, persisted to the script's own directory."""
 
-    path = os.path.join(os.path.expanduser("~"), ".openclaw", "hub_peer_id")
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub_peer_id")
+
+    if os.path.exists(path):
+
+        saved = open(path).read().strip()
+
+        if len(saved) == 16 and all(c in '0123456789abcdef' for c in saved):
+
+            log.info("Hub: loaded stable peer_id %s from %s", saved, path)
+
+            return saved
+
+        raise RuntimeError(f"hub_peer_id file exists but contains invalid id: {saved!r}. Fix or delete {path}")
+
+    # First run: generate and persist a new ID
 
     try:
 
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-
-        if os.path.exists(path):
-
-            saved = open(path).read().strip()
-
-            if len(saved) == 16 and all(c in '0123456789abcdef' for c in saved):
-
-                return saved
-
-        raw = str(time.time_ns()).encode()
-
-        new_id = hashlib.md5(raw).hexdigest()[:16]
+        new_id = hashlib.md5(str(time.time_ns()).encode()).hexdigest()[:16]
 
         open(path, "w").write(new_id)
 
-        log.info("Hub: created stable peer_id %s -?%s", new_id, path)
+        log.info("Hub: created stable peer_id %s -> %s", new_id, path)
 
         return new_id
 
