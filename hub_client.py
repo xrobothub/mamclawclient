@@ -168,6 +168,8 @@ class HubClient:
 
         self._groups: dict[str, dict]   = {}  # group_id -> {id,name,members}
 
+        self._friends: set[str]         = set()  # known friend ids (persisted for reconnect restore)
+
 
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -264,7 +266,16 @@ class HubClient:
 
                         log.info("Hub: connected as %s (id=%s)", self.name, self.peer_id)
 
-
+                        # Restore friend relationships so server allows message delivery after reconnect
+                        if self._friends:
+                            try:
+                                await ws.send(json.dumps({
+                                    "type":    "friend_restore",
+                                    "friends": list(self._friends),
+                                }))
+                                log.info("Hub: sent friend_restore for %d friends", len(self._friends))
+                            except Exception as e:
+                                log.warning("Hub: friend_restore failed: %s", e)
 
                         async for raw in ws:
 
@@ -276,7 +287,9 @@ class HubClient:
 
                                 continue
 
-                            await self._handle(msg, ws)
+                            # Fire as background task so pings are answered
+                            # immediately even while AI is generating a reply
+                            asyncio.create_task(self._handle(msg, ws))
 
 
 
@@ -323,6 +336,8 @@ class HubClient:
                     "from": msg["from"],
 
                 }))
+
+                self._friends.add(msg["from"])  # remember for reconnect restore
 
             except Exception as e:
 
@@ -432,7 +447,17 @@ class HubClient:
 
 
 
-        elif t in ("peer_joined", "peer_left", "friend_accepted",
+        elif t == "friend_accepted":
+
+            fid = msg.get("peer_id") or msg.get("from", "")
+
+            if fid:
+
+                self._friends.add(fid)  # remember for reconnect restore
+
+            log.debug("Hub event: friend_accepted from %s", fid)
+
+        elif t in ("peer_joined", "peer_left",
 
                    "friend_rejected", "friend_request_sent"):
 
