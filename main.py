@@ -1,0 +1,224 @@
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.responses import FileResponse
+import asyncio
+import json
+import logging
+import os
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv 未安装时忽略，直接用系统环境变量
+import httpx
+import time
+from pathlib import Path
+import traceback
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("openclaw-proxy")
+
+# ── OpenClaw 网关 ─────────────────────────────────────────────────────────────
+OPENCLAW_HTTP        = os.getenv("OPENCLAW_HTTP",        "http://127.0.0.1:18789")
+OPENCLAW_WS          = os.getenv("OPENCLAW_WS",          "ws://127.0.0.1:18789")
+OPENCLAW_TOKEN       = os.getenv("OPENCLAW_TOKEN",       "")
+OPENCLAW_AGENT       = os.getenv("OPENCLAW_AGENT",       "main")
+OPENCLAW_SESSION_KEY = os.getenv("OPENCLAW_SESSION_KEY", "agent:main:main")
+OPENCLAW_CHAT_URL    = OPENCLAW_HTTP.rstrip('/') + '/v1/chat/completions'
+
+# Try to import the WS client; fall back to HTTP-only if pynacl missing
+try:
+    from openclaw_ws_client import OpenClawWSClient
+    _WS_AVAILABLE = True
+except ImportError:
+    _WS_AVAILABLE = False
+    log.warning("openclaw_ws_client not importable – HTTP-only mode")
+
+# Try to import the Hub client
+try:
+    from hub_client import HubClient
+    _HUB_AVAILABLE = True
+except ImportError:
+    _HUB_AVAILABLE = False
+    log.warning("hub_client not importable – hub disabled")
+
+HUB_WS_URL = os.getenv("OPENCLAW_HUB_WS", "")      # e.g. ws://hub:9000/ws
+HUB_NAME   = os.getenv("OPENCLAW_HUB_NAME",   "Lobster")
+HUB_AVATAR = os.getenv("OPENCLAW_HUB_AVATAR",  "🦞")
+
+_gw_client:  "OpenClawWSClient | None" = None
+_hub_client: "HubClient | None"        = None
+
+
+async def _start_ws_client():
+    global _gw_client
+    if not _WS_AVAILABLE:
+        return
+    client = OpenClawWSClient()
+    try:
+        await client.connect()
+        _gw_client = client
+        log.info("Gateway WS client connected")
+    except Exception as e:
+        log.warning("Gateway WS connect failed (%s) – falling back to HTTP", e)
+        _gw_client = None
+
+
+def _extract_text(events: list[dict]) -> str:
+    """Pull the final assistant text out of a list of openclaw WS chat events."""
+    # 1. chat state=final payload
+    for e in reversed(events):
+        if e.get("event") == "chat" and (e.get("payload") or {}).get("state") == "final":
+            msgs = ((e.get("payload") or {}).get("message") or {}).get("content") or []
+            text = " ".join(c.get("text", "") for c in msgs if c.get("type") == "text")
+            if text.strip():
+                return text.strip()
+    # 2. last agent assistant stream chunk
+    for e in reversed(events):
+        if (e.get("event") == "agent"
+                and (e.get("payload") or {}).get("stream") == "assistant"):
+            text = ((e.get("payload") or {}).get("data") or {}).get("text", "")
+            if text.strip():
+                return text.strip()
+    return ""
+
+
+async def _start_hub_client():
+    global _hub_client
+    if not (_HUB_AVAILABLE and HUB_WS_URL):
+        return
+
+    async def on_friend_message(from_id: str, from_name: str, content: str) -> str | None:
+        """Route an incoming hub message through the local OpenClaw agent."""
+        if not (_gw_client and _gw_client.connected):
+            return None
+        try:
+            prompt = f"[来自 {from_name}]: {content}"
+            events = await _gw_client.chat(prompt)
+            text   = _extract_text(events)
+            return text or None
+        except Exception as e:
+            log.warning("hub on_message handler error: %s", e)
+            return None
+
+    hub = HubClient(HUB_WS_URL, HUB_NAME, HUB_AVATAR, on_message=on_friend_message)
+    try:
+        await hub.start()
+        _hub_client = hub
+        log.info("Hub client started (%s)", HUB_WS_URL)
+    except Exception as e:
+        log.warning("Hub client failed to start: %s", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await _start_ws_client()
+    await _start_hub_client()
+    yield
+    if _gw_client:
+        await _gw_client.close()
+    if _hub_client:
+        await _hub_client.stop()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+# ── memory persistence ────────────────────────────────────────────────────────
+
+async def append_conversation_to_memory(user_message: str, response_obj):
+    try:
+        mem_dir = Path("/root/.openclaw/workspace/memory")
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        mem_path = mem_dir / f"{time.strftime('%Y-%m-%d')}.txt"
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"[{timestamp}] User: {user_message}\nResponse: {json.dumps(response_obj, ensure_ascii=False)}\n\n"
+
+        def _write():
+            with open(mem_path, 'a', encoding='utf-8') as f:
+                f.write(entry)
+
+        await asyncio.to_thread(_write)
+    except Exception as e:
+        log.info("append_conversation_to_memory error: %s", e)
+
+
+# ── HTTP fallback helper ──────────────────────────────────────────────────────
+
+async def _chat_via_http(msg: str) -> dict:
+    headers = {"Content-Type": "application/json", "x-openclaw-agent-id": OPENCLAW_AGENT}
+    if OPENCLAW_TOKEN:
+        headers["Authorization"] = f"Bearer {OPENCLAW_TOKEN}"
+    body = {"model": "openclaw", "messages": [{"role": "user", "content": msg}]}
+    async with httpx.AsyncClient() as client:
+        r = await client.post(OPENCLAW_CHAT_URL, headers=headers, json=body, timeout=60.0)
+        log.info("HTTP chat status: %s", r.status_code)
+        if r.status_code != 200:
+            return {"error": f"status {r.status_code}", "detail": r.text}
+        return {"reply": r.json()}
+
+
+# ── routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def get_index():
+    return FileResponse("index.html")
+
+
+@app.post("/chat")
+async def chat(request: Request):
+    data = await request.json()
+    msg = data.get("message", "")
+    try:
+        if _gw_client and _gw_client.connected:
+            log.info("[/chat] using WS gateway")
+            events = await _gw_client.chat(msg)
+            result = {"reply": events}
+        else:
+            log.info("[/chat] using HTTP fallback")
+            result = await _chat_via_http(msg)
+        await append_conversation_to_memory(msg, result)
+        return result
+    except Exception as e:
+        tb = traceback.format_exc()
+        log.error("/chat error: %s\n%s", e, tb)
+        return {"error": str(e)}
+
+
+@app.websocket("/ws")
+async def websocket_proxy(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive_text()
+            log.info("From browser (ws): %s", msg[:120])
+            try:
+                if _gw_client and _gw_client.connected:
+                    log.info("[/ws] using WS gateway")
+                    events = await _gw_client.chat(msg)
+                    result = {"reply": events}
+                else:
+                    log.info("[/ws] using HTTP fallback")
+                    result = await _chat_via_http(msg)
+                await ws.send_text(json.dumps(result, ensure_ascii=False))
+                await append_conversation_to_memory(msg, result)
+            except Exception as e:
+                tb = traceback.format_exc()
+                log.error("ws handler error: %s\n%s", e, tb)
+                try:
+                    await ws.send_text(json.dumps({"error": str(e)}))
+                except Exception:
+                    pass
+    except Exception as e:
+        log.info("websocket_proxy loop stopped: %s", e)
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)

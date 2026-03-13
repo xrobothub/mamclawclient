@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OpenClaw Chat</title>
+    <style>
+      :root{--bg:#f6f8fb;--me:#0b5fff;--bot:#0f1724;--muted:#6b7280}
+      html,body{height:100%}
+      body{font-family:system-ui,Segoe UI,Arial,Helvetica,sans-serif;margin:0;background:var(--bg);color:var(--bot)}
+      .container{max-width:900px;margin:20px auto;padding:16px;background:#fff;border-radius:8px;box-shadow:0 6px 18px rgba(15,23,36,0.06)}
+      header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+      h3{margin:0;font-size:18px}
+      .status{font-size:13px;color:var(--muted)}
+
+      #messages{border:1px solid #e6e7eb;padding:12px;height:62vh;overflow:auto;background:linear-gradient(180deg,#ffffff 0%, #fbfdff 100%);border-radius:6px}
+      .msg{margin:10px 0;display:flex}
+      .bubble{max-width:78%;padding:10px 12px;border-radius:10px;line-height:1.45;white-space:pre-wrap}
+      .me{justify-content:flex-end}
+      .me .bubble{background:linear-gradient(90deg,var(--me),#4b9bff);color:white;border-bottom-right-radius:2px}
+      .bot .bubble{background:#f1f5f9;color:var(--bot);border-bottom-left-radius:2px}
+      .meta{font-size:12px;color:var(--muted);margin-top:6px}
+
+      details pre{background:#0b1220;color:#e6eef8;padding:10px;border-radius:6px;overflow:auto;max-height:240px}
+      .controls{display:flex;gap:8px;margin-top:10px}
+      textarea#input{width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #d6d9df;min-height:48px;resize:vertical}
+      button{padding:8px 12px;border-radius:6px;border:1px solid #d6d9df;background:white;cursor:pointer}
+      button.primary{background:var(--me);color:white;border-color:transparent}
+      .muted{color:var(--muted)}
+      .toolbar{display:flex;align-items:center;gap:8px}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h3>OpenClaw Chat</h3>
+        <div class="toolbar">
+          <div id="status" class="status">状态：<span class="muted">连接中...</span></div>
+          <button id="clear">清除</button>
+        </div>
+      </header>
+
+      <div id="messages" aria-live="polite"></div>
+
+      <div class="controls">
+        <textarea id="input" placeholder="输入消息，按 Enter 发送（Shift+Enter 换行）"></textarea>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button id="send" class="primary">发送</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const messages = document.getElementById('messages');
+      const input = document.getElementById('input');
+      const sendBtn = document.getElementById('send');
+      const clearBtn = document.getElementById('clear');
+      const statusEl = document.getElementById('status');
+
+      function nowTs(){
+        const d = new Date();
+        return d.toLocaleString();
+      }
+
+      function addMsg({role='bot', text='', json=null} = {}){
+        const wrap = document.createElement('div');
+        wrap.className = 'msg ' + (role === 'me' ? 'me' : 'bot');
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = text;
+        wrap.appendChild(bubble);
+
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = (role === 'me' ? '你' : '系统') + ' • ' + nowTs();
+        wrap.appendChild(meta);
+
+        if(json){
+          const details = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = '查看完整响应 JSON';
+          const pre = document.createElement('pre');
+          pre.textContent = JSON.stringify(json, null, 2);
+          // copy button
+          const copyBtn = document.createElement('button');
+          copyBtn.textContent = '复制 JSON';
+          copyBtn.style.marginTop = '8px';
+          copyBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(pre.textContent).then(()=>{
+              copyBtn.textContent = '已复制';
+              setTimeout(()=> copyBtn.textContent = '复制 JSON', 1500);
+            });
+          });
+          details.appendChild(summary);
+          details.appendChild(pre);
+          details.appendChild(copyBtn);
+          wrap.appendChild(details);
+        }
+
+        messages.appendChild(wrap);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+      // show initial status
+      statusEl.querySelector('.muted').textContent = wsUrl;
+
+      // Reconnect logic
+      let ws;
+      let reconnectAttempts = 0;
+      const maxReconnectDelay = 30000; // 30s
+      const messageQueue = [];
+
+      function connect() {
+        ws = new WebSocket(wsUrl);
+
+        ws.addEventListener('open', () => {
+          reconnectAttempts = 0;
+          statusEl.innerHTML = '状态：<span style="color:green">已连接</span>';
+          addMsg({role:'bot', text:'已连接后端'});
+          // flush queued messages
+          while(messageQueue.length){
+            const m = messageQueue.shift();
+            try{ ws.send(m); }catch(e){ messageQueue.unshift(m); break; }
+          }
+        });
+
+        ws.addEventListener('message', ev => {
+          try{
+            const obj = JSON.parse(ev.data);
+            // try to display a human message if available
+            let shown = '';
+            if(obj && obj.reply){
+              const r = obj.reply;
+              // OpenClaw WS gateway: array of events
+              if(Array.isArray(r)){
+                // 1. chat event with state:"final" has the complete text
+                const finalChat = r.filter(e =>
+                  e.type === 'event' && e.event === 'chat' &&
+                  e.payload && e.payload.state === 'final' &&
+                  e.payload.message && Array.isArray(e.payload.message.content)
+                ).pop();
+                if(finalChat){
+                  shown = finalChat.payload.message.content
+                    .filter(c => c.type === 'text').map(c => c.text).join('');
+                }
+                // 2. fallback: last agent assistant event with accumulated text
+                if(!shown){
+                  const lastAgent = r.filter(e =>
+                    e.type === 'event' && e.event === 'agent' &&
+                    e.payload && e.payload.stream === 'assistant' &&
+                    e.payload.data && e.payload.data.text
+                  ).pop();
+                  if(lastAgent) shown = lastAgent.payload.data.text;
+                }
+              }
+              // OpenAI-compatible: choices -> message -> content
+              else if(r.choices && r.choices.length && r.choices[0].message && r.choices[0].message.content){
+                shown = r.choices[0].message.content;
+              } else if(r.choices && r.choices.length && r.choices[0].delta && r.choices[0].delta.content){
+                shown = r.choices[0].delta.content;
+              } else if(r.output && Array.isArray(r.output) && r.output.length){
+                shown = JSON.stringify(r.output, null, 2);
+              }
+            }
+            if(shown) addMsg({role:'bot', text: shown, json: obj});
+            else addMsg({role:'bot', text: JSON.stringify(obj, null, 2), json: obj});
+          }catch(e){
+            addMsg({role:'bot', text: ev.data});
+          }
+        });
+
+        ws.addEventListener('close', (ev) => {
+          statusEl.innerHTML = '状态：<span style="color:orange">已断开</span>';
+          addMsg({role:'bot', text:'连接已关闭'});
+          scheduleReconnect();
+        });
+
+        ws.addEventListener('error', (ev) => {
+          statusEl.innerHTML = '状态：<span style="color:red">错误</span>';
+          addMsg({role:'bot', text:'连接错误'});
+          try{ ws.close(); }catch(e){}
+        });
+      }
+
+      function scheduleReconnect(){
+        reconnectAttempts += 1;
+        const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), maxReconnectDelay);
+        addMsg({role:'bot', text: '将在 ' + Math.round(delay/1000) + 's 后重连...'});
+        setTimeout(() => {
+          addMsg({role:'bot', text: '尝试重连...'});
+          connect();
+        }, delay);
+      }
+
+      connect();
+
+      function send(){
+        const v = input.value.replace(/\n+$/,'');
+        if(!v.trim()) return;
+        addMsg({role:'me', text: v});
+        // send or queue
+        try{
+          if(ws && ws.readyState === WebSocket.OPEN){
+            ws.send(v);
+          } else {
+            messageQueue.push(v);
+            addMsg({role:'bot', text:'消息已排队，等待重连...'});
+          }
+        }catch(e){
+          messageQueue.push(v);
+          addMsg({role:'bot', text:'消息已排队，等待重连...'});
+        }
+        input.value = '';
+      }
+
+      sendBtn.addEventListener('click', send);
+      input.addEventListener('keydown', e => {
+        if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+      });
+      clearBtn.addEventListener('click', ()=> messages.innerHTML = '');
+    </script>
+  </body>
+</html>
