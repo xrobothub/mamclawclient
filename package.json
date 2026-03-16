@@ -1,0 +1,11 @@
+{
+  "name": "mamclawclient-openim-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "openim-bridge": "node openim_sdk_bridge.mjs"
+  },
+  "dependencies": {
+    "@openim/client-sdk": "^3.8.3"
+  }
+}

@@ -80,8 +80,22 @@ log = logging.getLogger("hub-client")
 
 def _load_or_create_peer_id() -> str:
 
-    """Return a stable 16-char hex ID, persisted to the script's own directory."""
+    """Return a stable 16-char hex ID.
 
+    Priority:
+      1. OPENCLAW_HUB_PEER_ID env var (explicit override, survives container restarts)
+      2. hub_peer_id file next to this script
+      3. Generate new ID and try to persist it; fall back to ephemeral if write fails.
+    """
+    # 1. Env var override
+    env_id = os.environ.get("OPENCLAW_HUB_PEER_ID", "").strip()
+    if env_id:
+        if len(env_id) == 16 and all(c in '0123456789abcdef' for c in env_id):
+            log.info("Hub: using peer_id from OPENCLAW_HUB_PEER_ID env var: %s", env_id)
+            return env_id
+        log.warning("Hub: OPENCLAW_HUB_PEER_ID=%r is invalid (must be 16 hex chars), ignoring", env_id)
+
+    # 2. Persisted file
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub_peer_id")
 
     if os.path.exists(path):
@@ -96,15 +110,17 @@ def _load_or_create_peer_id() -> str:
 
         raise RuntimeError(f"hub_peer_id file exists but contains invalid id: {saved!r}. Fix or delete {path}")
 
-    # First run: generate and persist a new ID
+    # 3. First run: generate and persist a new ID
 
     try:
 
         new_id = hashlib.md5(str(time.time_ns()).encode()).hexdigest()[:16]
 
-        open(path, "w").write(new_id)
+        with open(path, "w") as f:
+            f.write(new_id)
+        os.chmod(path, 0o444)
 
-        log.info("Hub: created stable peer_id %s -> %s", new_id, path)
+        log.info("Hub: created stable peer_id %s -> %s (read-only)", new_id, path)
 
         return new_id
 
@@ -396,6 +412,12 @@ class HubClient:
 
 
         elif t == "group_message":
+
+            # Ignore echo-back messages from server (muted/paused markers)
+
+            if msg.get("_muted") or msg.get("_paused"):
+
+                return
 
             group_id  = msg.get("group_id", "")
 

@@ -49,13 +49,49 @@ except ImportError:
     _HUB_AVAILABLE = False
     log.warning("hub_client not importable – hub disabled")
 
-HUB_WS_URL = os.getenv("OPENCLAW_HUB_WS", "ws://127.0.0.1:9000/ws")  # default: local hub
-HUB_NAME   = os.getenv("OPENCLAW_HUB_NAME",   "Lobster")
-HUB_AVATAR = os.getenv("OPENCLAW_HUB_AVATAR",  "🦞")
-log.info(".env loaded=%s  HUB_NAME=%r  HUB_AVATAR=%r  HUB_WS_URL=%s", _loaded, HUB_NAME, HUB_AVATAR, HUB_WS_URL)
+# Try to import the OpenIM client
+try:
+    from openim_client import OpenIMClient
+    _OPENIM_AVAILABLE = True
+except ImportError:
+    _OPENIM_AVAILABLE = False
+    log.warning("openim_client not importable – openim disabled")
 
-_gw_client:  "OpenClawWSClient | None" = None
-_hub_client: "HubClient | None"        = None
+HUB_WS_URL  = os.getenv("OPENCLAW_HUB_WS", "ws://127.0.0.1:9000/ws")
+HUB_NAME    = os.getenv("OPENCLAW_HUB_NAME",   "Lobster")
+HUB_AVATAR  = os.getenv("OPENCLAW_HUB_AVATAR",  "🦞")
+HUB_ENABLED = os.getenv("OPENCLAW_HUB_ENABLED", "1") != "0"
+log.info(".env loaded=%s  HUB_NAME=%r  HUB_AVATAR=%r  HUB_WS_URL=%s  HUB_ENABLED=%s",
+         _loaded, HUB_NAME, HUB_AVATAR, HUB_WS_URL, HUB_ENABLED)
+
+# ── OpenIM 设置 ──────────────────────────────────────────────────
+IM_USER_ID      = os.getenv("IM_USER_ID",      "")
+IM_TOKEN        = os.getenv("IM_TOKEN",        "")
+IM_API_ADDR     = os.getenv("IM_API_ADDR",     "http://47.239.0.170:10002")
+IM_POLL_INTERVAL= float(os.getenv("IM_POLL_INTERVAL", "3"))
+IM_ENABLED      = os.getenv("IM_ENABLED",      "1") != "0"
+log.info("OpenIM: user=%r  api=%s  poll=%.1fs  enabled=%s",
+         IM_USER_ID, IM_API_ADDR, IM_POLL_INTERVAL, IM_ENABLED)
+
+# ── Zulip 设置 ───────────────────────────────────────────────────────────────
+ZULIP_SITE     = os.getenv("ZULIP_SITE",    "")
+ZULIP_EMAIL    = os.getenv("ZULIP_EMAIL",   "")
+ZULIP_API_KEY  = os.getenv("ZULIP_API_KEY", "")
+ZULIP_LISTEN   = os.getenv("ZULIP_LISTEN",  "pm,mention")
+ZULIP_PRESENCE = os.getenv("ZULIP_PRESENCE", "1") != "0"
+ZULIP_ENABLED  = os.getenv("ZULIP_ENABLED",  "1") != "0"
+
+try:
+    from zulip_client import ZulipClient
+    _ZULIP_AVAILABLE = True
+except ImportError:
+    _ZULIP_AVAILABLE = False
+    log.warning("zulip_client not importable")
+
+_gw_client:    "OpenClawWSClient | None" = None
+_hub_client:   "HubClient | None"        = None
+_zulip_client: "ZulipClient | None"      = None
+_openim_client: "OpenIMClient | None"    = None
 
 
 async def _start_ws_client():
@@ -93,6 +129,9 @@ def _extract_text(events: list[dict]) -> str:
 
 async def _start_hub_client():
     global _hub_client
+    if not HUB_ENABLED:
+        log.info("Hub client disabled (OPENCLAW_HUB_ENABLED=0)")
+        return
     if not _HUB_AVAILABLE:
         log.warning("Hub client not available (import failed)")
         return
@@ -135,15 +174,118 @@ async def _start_hub_client():
         log.warning("Hub client failed to start: %s", e)
 
 
+async def _start_openim_client():
+    global _openim_client
+    if not IM_ENABLED:
+        log.info("OpenIM client disabled (IM_ENABLED=0)")
+        return
+    if not _OPENIM_AVAILABLE:
+        log.warning("OpenIM client not available (import failed)")
+        return
+    IM_EMAIL    = os.getenv("IM_EMAIL", "")
+    IM_PASSWORD = os.getenv("IM_PASSWORD", "")
+    if not IM_TOKEN and not IM_EMAIL:
+        log.info("OpenIM client disabled: set IM_TOKEN or IM_EMAIL+IM_PASSWORD")
+        return
+
+    async def on_im_message(
+        from_id: str, from_name: str, content: str, *,
+        session_type: int = 1, group_id: str = "", conv_id: str = ""
+    ) -> str | None:
+        """Route incoming OpenIM message through OpenClaw AI and return reply."""
+        if not _gw_client or not _gw_client.connected:
+            log.warning("openim on_message: gateway not ready, dropping")
+            return None
+        try:
+            import re as _re
+            who   = from_name or from_id
+            where = f"[{group_id}] " if group_id else ""
+            prompt = f"{where}[{who}]: {content}"
+            log.info("openim on_message: calling AI for %s", who)
+            events = await _gw_client.chat(prompt)
+            text   = _extract_text(events)
+            if text:
+                text = _re.sub(r'\n{3,}', '\n\n', text).strip()
+            log.info("openim on_message: reply=%s", (text or "")[:80])
+            return text or None
+        except Exception as e:
+            log.warning("openim on_message error: %s", e, exc_info=True)
+            return None
+
+    client = OpenIMClient(
+        user_id       = IM_USER_ID,
+        im_token      = IM_TOKEN,
+        api_addr      = IM_API_ADDR,
+        poll_interval = IM_POLL_INTERVAL,
+        on_message    = on_im_message,
+    )
+    try:
+        await client.start()
+        _openim_client = client
+        log.info("OpenIM client started (user=%s)", client.user_id)
+    except Exception as e:
+        log.warning("OpenIM client failed to start: %s", e)
+
+
+async def _start_zulip_client():
+    global _zulip_client
+    if not ZULIP_ENABLED:
+        log.info("Zulip client disabled (ZULIP_ENABLED=0)")
+        return
+    if not _ZULIP_AVAILABLE:
+        return
+    if not (ZULIP_SITE and ZULIP_EMAIL and ZULIP_API_KEY):
+        log.info("Zulip client disabled: ZULIP_SITE / ZULIP_EMAIL / ZULIP_API_KEY not set")
+        return
+
+    async def on_zulip_message(from_id: str, from_name: str, content: str) -> str | None:
+        if not _gw_client or not _gw_client.connected:
+            log.warning("zulip on_message: gateway not ready, dropping message")
+            return None
+        try:
+            import re as _re
+            prompt = f"[来自 {from_name}]: {content}"
+            events = await _gw_client.chat(prompt)
+            text   = _extract_text(events)
+            if text:
+                text = _re.sub(r'\n{3,}', '\n\n', text).strip()
+            return text or None
+        except Exception as e:
+            log.warning("zulip on_message error: %s", e, exc_info=True)
+            return None
+
+    zc = ZulipClient(
+        site      = ZULIP_SITE,
+        email     = ZULIP_EMAIL,
+        api_key   = ZULIP_API_KEY,
+        name      = HUB_NAME,
+        listen    = ZULIP_LISTEN,
+        presence  = ZULIP_PRESENCE,
+        on_message = on_zulip_message,
+    )
+    try:
+        await zc.start()
+        _zulip_client = zc
+        log.info("Zulip client started (%s as %s)", ZULIP_SITE, ZULIP_EMAIL)
+    except Exception as e:
+        log.warning("Zulip client failed to start: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _start_ws_client()
     await _start_hub_client()
+    await _start_zulip_client()
+    await _start_openim_client()
     yield
     if _gw_client:
         await _gw_client.close()
     if _hub_client:
         await _hub_client.stop()
+    if _zulip_client:
+        await _zulip_client.stop()
+    if _openim_client:
+        await _openim_client.stop()
 
 
 app = FastAPI(lifespan=lifespan)
