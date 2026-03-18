@@ -1,24 +1,17 @@
 """
 OpenIM REST polling client for mamclawclient
 ────────────────────────────────────────────
-Connects to the OpenIM HTTP API as a regular user, polls for new messages,
-and sends text replies.
-
-Auto-login (recommended):
-  Set IM_EMAIL + IM_PASSWORD and leave IM_TOKEN empty.  The client will
-  call the Chat API to obtain a fresh imToken on startup automatically.
+Runs in bridge-first mode: poll/send over local HTTP bridge.
 
 Env vars (all optional, can also be passed as constructor args):
-  IM_EMAIL          Account email (for auto-login)
-  IM_PASSWORD       Account password (for auto-login)
-  IM_CHAT_ADDR      Chat API address, e.g. http://47.239.0.170:10008
-                    (defaults to IM_API_ADDR with port replaced to 10008)
-  IM_USER_ID        UserID of this virtual user (resolved via login if empty)
-  IM_TOKEN          imToken override (skip auto-login if set)
-  IM_API_ADDR       OpenIM IM API address, e.g. http://47.239.0.170:10002
+    OPENIM_USE_BRIDGE Set to 1 to use local bridge (default 1)
+    OPENIM_BRIDGE_URL Local bridge URL, e.g. http://127.0.0.1:8788
+    IM_USER_ID        UserID (only used when OPENIM_USE_BRIDGE=0)
+    IM_TOKEN          imToken (only used when OPENIM_USE_BRIDGE=0)
+    IM_API_ADDR       OpenIM IM API address, e.g. http://47.239.0.170:10002
     IM_PLATFORM_ID    Platform ID (default 3 = Windows)
-  IM_POLL_INTERVAL  Poll interval in seconds (default 3)
-  IM_ENABLED        Set to 0 to disable (default 1)
+    IM_POLL_INTERVAL  Poll interval in seconds (default 3)
+    IM_ENABLED        Set to 0 to disable (default 1)
 """
 
 from __future__ import annotations
@@ -68,13 +61,6 @@ class OpenIMClient:
         self.use_bridge    = os.getenv("OPENIM_USE_BRIDGE", "1") != "0"
         self.bridge_url    = os.getenv("OPENIM_BRIDGE_URL", "http://127.0.0.1:8788").rstrip("/")
 
-        # Auto-login credentials (used when IM_TOKEN is not set)
-        self._email    = os.getenv("IM_EMAIL", "")
-        self._password = os.getenv("IM_PASSWORD", "")
-        # Chat API address (for login); derives from IM_API_ADDR if not set
-        _chat_default = self.base.rsplit(":", 1)[0] + ":10008"
-        self._chat_base = os.getenv("IM_CHAT_ADDR", _chat_default).rstrip("/")
-
         self._seen: dict[str, str] = {}        # conv_id → last seen msgInfo.clientMsgID
         self._conv_meta: dict[str, dict] = {}  # conv_id → full conversation element
         self._ready      = False
@@ -82,36 +68,6 @@ class OpenIMClient:
         self._task: asyncio.Task | None = None
 
     # ── public API ────────────────────────────────────────────────────────────
-
-    async def _login(self) -> bool:
-        """Login via Chat API to obtain a fresh imToken.  Returns True on success."""
-        if not self._email or not self._password:
-            return False
-        body = {
-            "email":      self._email,
-            "password":   self._password,
-            "areaCode":   "",
-            "platform":   self.platform_id,
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "operationID":  f"py{int(time.time() * 1000)}",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.post(f"{self._chat_base}/account/login", json=body, headers=headers)
-                data = r.json()
-        except Exception as e:
-            log.error("OpenIM login request failed: %s", e)
-            return False
-        if data.get("errCode", -1) != 0:
-            log.error("OpenIM login failed: [%s] %s", data.get("errCode"), data.get("errMsg"))
-            return False
-        d = data.get("data") or {}
-        self.token    = d.get("imToken", "")
-        self.user_id  = self.user_id or d.get("userID", "")
-        log.info("OpenIM login OK  userID=%s  token=%.20s…", self.user_id, self.token)
-        return bool(self.token)
 
     async def start(self):
         if self.use_bridge:
@@ -125,11 +81,6 @@ class OpenIMClient:
                      self.bridge_url, self.user_id or "-", self.poll_interval)
             return
 
-        # Try auto-login if no static token
-        if not self.token and self._email:
-            if not await self._login():
-                log.error("OpenIM client failed to login — not starting")
-                return
         if not self.user_id or not self.token:
             log.warning("OpenIM client disabled: IM_USER_ID or IM_TOKEN not set")
             return

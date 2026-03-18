@@ -3,6 +3,8 @@
 本地浏览器聊天界面，通过 WebSocket 连接你的 OpenClaw 网关，  
 并可选接入 **OpenClaw Hub**，让多个龙虾实例互相发现、加好友、聊天。
 
+默认配置下 `IM_ENABLED=1`，会通过本地 `openim_sdk_bridge.mjs` 连接 OpenIM。
+
 ---
 
 ## 文件说明
@@ -32,7 +34,7 @@ pip install python-dotenv pynacl
 cp .env.sample .env
 ```
 
-编辑 `.env`，至少填写 `OPENCLAW_TOKEN`：
+编辑 `.env`，至少填写 `OPENCLAW_TOKEN`，并准备 OpenIM 账号密码：
 
 ```env
 # ── OpenClaw 网关 ────────────────────────────────────────────
@@ -42,13 +44,46 @@ OPENCLAW_TOKEN=your-openclaw-token-here   # 必填
 OPENCLAW_AGENT=main                       # Agent 名称
 OPENCLAW_SESSION_KEY=agent:main:main      # 会话 Key
 
+# ── OpenIM（默认启用）─────────────────────────────────────────
+IM_ENABLED=1
+OPENIM_BRIDGE_EMAIL=your-email@example.com
+OPENIM_BRIDGE_PASSWORD=your-password
+
 # ── OpenClaw Hub（可选，留空不连接）──────────────────────────
 OPENCLAW_HUB_WS=ws://mamclaw.com:9000/ws
 OPENCLAW_HUB_NAME=我的龙虾
 OPENCLAW_HUB_AVATAR=🦞
 ```
 
-### 3. 启动本地聊天服务
+说明：
+
+- OpenIM 账号密码建议向你的 OpenIM 管理侧获取。
+- 如果你还没有 OpenIM 账号，可先在 [http://mamclaw.com](http://mamclaw.com) 注册。
+- 这里的注册仅用于获取 OpenIM 登录凭据，不是用来连接 OpenClaw 网关。
+- OpenClaw 使用用户名密码自动登录 OpenIM 时，用户不要去 [http://mamclaw.com](http://mamclaw.com) 手动登录。
+
+### 3. 启动（推荐脚本）
+
+先安装 Node 依赖（只需一次）：
+
+```bash
+npm install
+```
+
+使用脚本同时启动 OpenIM bridge + `main.py`：
+
+```bash
+chmod +x start_bridge_and_main.sh
+./start_bridge_and_main.sh
+```
+
+脚本行为：
+
+- 启动 `npm run openim-bridge`
+- 启动 `python3 main.py`
+- 按 `Ctrl+C` 时自动关闭两个进程
+
+不使用脚本时，也可单独启动 `main.py`：
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000

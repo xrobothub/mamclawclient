@@ -182,10 +182,16 @@ async def _start_openim_client():
     if not _OPENIM_AVAILABLE:
         log.warning("OpenIM client not available (import failed)")
         return
-    IM_EMAIL    = os.getenv("IM_EMAIL", "")
-    IM_PASSWORD = os.getenv("IM_PASSWORD", "")
-    if not IM_TOKEN and not IM_EMAIL:
-        log.info("OpenIM client disabled: set IM_TOKEN or IM_EMAIL+IM_PASSWORD")
+    use_bridge = os.getenv("OPENIM_USE_BRIDGE", "1") != "0"
+    if use_bridge:
+        bridge_token = os.getenv("OPENIM_BRIDGE_TOKEN", "")
+        bridge_email = os.getenv("OPENIM_BRIDGE_EMAIL", "")
+        bridge_password = os.getenv("OPENIM_BRIDGE_PASSWORD", "")
+        if not (bridge_token or (bridge_email and bridge_password)):
+            log.info("OpenIM client disabled: set OPENIM_BRIDGE_TOKEN or OPENIM_BRIDGE_EMAIL+OPENIM_BRIDGE_PASSWORD")
+            return
+    elif not IM_TOKEN:
+        log.info("OpenIM client disabled: set IM_TOKEN (non-bridge mode)")
         return
 
     async def on_im_message(

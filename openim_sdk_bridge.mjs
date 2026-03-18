@@ -50,11 +50,11 @@ const CHAT_API = (
   || IM_API.replace(/:\d+$/, ':10008')
 ).trim();
 
-const LOGIN_EMAIL = (process.env.OPENIM_BRIDGE_EMAIL || process.env.IM_EMAIL || '').trim();
-const LOGIN_PASSWORD = (process.env.OPENIM_BRIDGE_PASSWORD || process.env.IM_PASSWORD || '').trim();
+const LOGIN_EMAIL = (process.env.OPENIM_BRIDGE_EMAIL || '').trim();
+const LOGIN_PASSWORD = (process.env.OPENIM_BRIDGE_PASSWORD || '').trim();
 
-let sdkUserId = (process.env.OPENIM_BRIDGE_USER_ID || process.env.IM_USER_ID || '').trim();
-let sdkToken = (process.env.OPENIM_BRIDGE_TOKEN || process.env.IM_TOKEN || '').trim();
+let sdkUserId = (process.env.OPENIM_BRIDGE_USER_ID || '').trim();
+let sdkToken = (process.env.OPENIM_BRIDGE_TOKEN || '').trim();
 
 let ready = false;
 let connecting = null;
