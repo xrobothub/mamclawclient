@@ -109,19 +109,13 @@ async def _start_ws_client():
 
 
 def _extract_text(events: list[dict]) -> str:
-    """Pull the final assistant text out of a list of openclaw WS chat events."""
-    # 1. chat state=final payload
+    """Pull the final assistant text out of a list of openclaw WS chat events.
+    Only reads chat state=final; intermediate streaming chunks are ignored.
+    """
     for e in reversed(events):
         if e.get("event") == "chat" and (e.get("payload") or {}).get("state") == "final":
             msgs = ((e.get("payload") or {}).get("message") or {}).get("content") or []
             text = " ".join(c.get("text", "") for c in msgs if c.get("type") == "text")
-            if text.strip():
-                return text.strip()
-    # 2. last agent assistant stream chunk
-    for e in reversed(events):
-        if (e.get("event") == "agent"
-                and (e.get("payload") or {}).get("stream") == "assistant"):
-            text = ((e.get("payload") or {}).get("data") or {}).get("text", "")
             if text.strip():
                 return text.strip()
     return ""
