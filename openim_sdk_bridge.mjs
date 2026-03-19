@@ -50,7 +50,7 @@ const CHAT_API = (
   || IM_API.replace(/:\d+$/, ':10008')
 ).trim();
 
-const LOGIN_EMAIL = (process.env.OPENIM_BRIDGE_EMAIL || '').trim();
+const LOGIN_EMAIL = (process.env.OPENIM_BRIDGE_EMAIL_OR_PHONE || '').trim();
 const LOGIN_PASSWORD = (process.env.OPENIM_BRIDGE_PASSWORD || '').trim();
 
 let sdkUserId = (process.env.OPENIM_BRIDGE_USER_ID || '').trim();
@@ -220,7 +220,7 @@ async function ensureLogin() {
   }
   if (!sdkUserId || !sdkToken) {
     if (!LOGIN_EMAIL || !LOGIN_PASSWORD) {
-      throw new Error('Missing token and login credentials. Set OPENIM_BRIDGE_TOKEN or OPENIM_BRIDGE_EMAIL/OPENIM_BRIDGE_PASSWORD');
+      throw new Error('Missing token and login credentials. Set OPENIM_BRIDGE_TOKEN or OPENIM_BRIDGE_EMAIL_OR_PHONE/OPENIM_BRIDGE_PASSWORD');
     }
 
     const opid = `bridge${Date.now()}`;

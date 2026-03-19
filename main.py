@@ -96,26 +96,78 @@ _openim_client: "OpenIMClient | None"    = None
 
 async def _start_ws_client():
     global _gw_client
+    log.info("OpenClaw WS: connecting to %s ...", OPENCLAW_WS)
     if not _WS_AVAILABLE:
+        log.warning("OpenClaw WS: NOT available (pynacl missing) – HTTP-only mode")
         return
     client = OpenClawWSClient()
     try:
         await client.connect()
         _gw_client = client
-        log.info("Gateway WS client connected")
+        log.info("OpenClaw WS: ✓ connected  url=%s", OPENCLAW_WS)
     except Exception as e:
-        log.warning("Gateway WS connect failed (%s) – falling back to HTTP", e)
+        log.warning("OpenClaw WS: ✗ connect FAILED (%s) – falling back to HTTP", e)
         _gw_client = None
+
+
+def _log_events(events: list[dict], source: str = "") -> None:
+    """Print all raw events received from OpenClaw gateway for debugging."""
+    prefix = f"[openclaw{':' + source if source else ''}]"
+    log.info("%s received %d event(s)", prefix, len(events))
+    for i, e in enumerate(events):
+        event_name = e.get("event", "")
+        msg_type   = e.get("type", "")
+        payload    = e.get("payload") or {}
+        stream     = payload.get("stream", "")
+        state      = payload.get("state", "")
+        phase      = (payload.get("data") or {}).get("phase", "")
+        ok         = e.get("ok")
+
+        # Build a short summary line
+        parts = [f"#{i}"]
+        if msg_type:  parts.append(f"type={msg_type}")
+        if event_name: parts.append(f"event={event_name}")
+        if stream:    parts.append(f"stream={stream}")
+        if state:     parts.append(f"state={state}")
+        if phase:     parts.append(f"phase={phase}")
+        if ok is not None: parts.append(f"ok={ok}")
+
+        # For final chat messages, show the text content
+        if event_name == "chat" and state == "final":
+            msgs = (payload.get("message") or {}).get("content") or []
+            text = " ".join(c.get("text", "") for c in msgs if c.get("type") == "text")
+            parts.append(f"text={text[:120]!r}")
+        # For assistant stream chunks, show partial text
+        elif event_name == "agent" and stream == "assistant":
+            text = (payload.get("data") or {}).get("text", "")
+            parts.append(f"chunk={text[:60]!r}")
+        # For errors / rejected responses
+        elif msg_type == "res" and ok is False:
+            err = e.get("error") or {}
+            parts.append(f"error={err.get('code','')}:{err.get('message','')}")
+
+        log.info("%s  %s", prefix, "  ".join(parts))
 
 
 def _extract_text(events: list[dict]) -> str:
     """Pull the final assistant text out of a list of openclaw WS chat events.
-    Only reads chat state=final; intermediate streaming chunks are ignored.
+
+    Priority:
+    1. chat state=final  (preferred: contains complete structured message)
+    2. last agent stream=assistant chunk  (fallback: accumulated text in final chunk)
     """
+    # 1. chat state=final
     for e in reversed(events):
         if e.get("event") == "chat" and (e.get("payload") or {}).get("state") == "final":
             msgs = ((e.get("payload") or {}).get("message") or {}).get("content") or []
             text = " ".join(c.get("text", "") for c in msgs if c.get("type") == "text")
+            if text.strip():
+                return text.strip()
+    # 2. last agent stream=assistant chunk (OpenClaw sends accumulated text each time)
+    for e in reversed(events):
+        if (e.get("event") == "agent"
+                and (e.get("payload") or {}).get("stream") == "assistant"):
+            text = ((e.get("payload") or {}).get("data") or {}).get("text", "")
             if text.strip():
                 return text.strip()
     return ""
@@ -143,17 +195,14 @@ async def _start_hub_client():
             return None
         try:
             prompt = f"[来自 {from_name}]: {content}"
-            log.info("hub on_message: calling _gw_client.chat for %s", from_name)
+            log.info("hub on_message: calling AI for %s", from_name)
             events = await _gw_client.chat(prompt)
-            log.info("hub on_message: got %d events from gw", len(events) if events else 0)
-            for i, e in enumerate(events or []):
-                log.info("  event[%d]: %s", i, str(e)[:200])
+            _log_events(events, "hub")
             text   = _extract_text(events)
-            # Collapse 3+ consecutive newlines down to 2 (one blank line max)
             if text:
                 import re as _re
                 text = _re.sub(r'\n{3,}', '\n\n', text).strip()
-            log.info("hub on_message: extracted text=%s", (text or "")[:80])
+            log.info("hub on_message: reply=%s", (text or "")[:80])
             return text or None
         except Exception as e:
             log.warning("hub on_message handler error: %s", e, exc_info=True)
@@ -179,10 +228,10 @@ async def _start_openim_client():
     use_bridge = os.getenv("OPENIM_USE_BRIDGE", "1") != "0"
     if use_bridge:
         bridge_token = os.getenv("OPENIM_BRIDGE_TOKEN", "")
-        bridge_email = os.getenv("OPENIM_BRIDGE_EMAIL", "")
+        bridge_email = os.getenv("OPENIM_BRIDGE_EMAIL_OR_PHONE", "")
         bridge_password = os.getenv("OPENIM_BRIDGE_PASSWORD", "")
         if not (bridge_token or (bridge_email and bridge_password)):
-            log.info("OpenIM client disabled: set OPENIM_BRIDGE_TOKEN or OPENIM_BRIDGE_EMAIL+OPENIM_BRIDGE_PASSWORD")
+            log.info("OpenIM client disabled: set OPENIM_BRIDGE_TOKEN or OPENIM_BRIDGE_EMAIL_OR_PHONE+OPENIM_BRIDGE_PASSWORD")
             return
     elif not IM_TOKEN:
         log.info("OpenIM client disabled: set IM_TOKEN (non-bridge mode)")
@@ -203,6 +252,7 @@ async def _start_openim_client():
             prompt = f"{where}[{who}]: {content}"
             log.info("openim on_message: calling AI for %s", who)
             events = await _gw_client.chat(prompt)
+            _log_events(events, "openim")
             text   = _extract_text(events)
             if text:
                 text = _re.sub(r'\n{3,}', '\n\n', text).strip()

@@ -46,7 +46,7 @@ OPENCLAW_SESSION_KEY=agent:main:main      # 会话 Key
 
 # ── OpenIM（默认启用）─────────────────────────────────────────
 IM_ENABLED=1
-OPENIM_BRIDGE_EMAIL=your-email@example.com
+OPENIM_BRIDGE_EMAIL_OR_PHONE=your-email@example.com
 OPENIM_BRIDGE_PASSWORD=your-password
 
 # ── OpenClaw Hub（可选，留空不连接）──────────────────────────
